@@ -19,6 +19,7 @@
 
 namespace Doctrine\ORM\Tools;
 
+use Doctrine\ORM\EntityManager;
 use Doctrine\ORM\Event\LoadClassMetadataEventArgs;
 use Doctrine\ORM\Mapping\ClassMetadata;
 
@@ -54,36 +55,61 @@ class ResolveTargetEntityListener
     }
 
     /**
-     * Processes event and resolves new target entity names.
+     * Process event and resolve new target entity names.
      *
      * @param LoadClassMetadataEventArgs $args
-     *
      * @return void
      */
     public function loadClassMetadata(LoadClassMetadataEventArgs $args)
     {
         $cm = $args->getClassMetadata();
-
         foreach ($cm->associationMappings as $mapping) {
             if (isset($this->resolveTargetEntities[$mapping['targetEntity']])) {
-                $this->remapAssociation($cm, $mapping);
+                $this->remapAssociation($cm, $mapping, $args->getEntityManager());
             }
         }
     }
 
-    /**
-     * @param \Doctrine\ORM\Mapping\ClassMetadataInfo $classMetadata
-     * @param array                                   $mapping
-     *
-     * @return void
-     */
-    private function remapAssociation($classMetadata, $mapping)
+    private function getMappedIdentifiers($fieldName, $classMetadata)
+    {
+        $ids = [];
+        foreach ($classMetadata->getIdentifier() as $identifier) {
+            if ($classMetadata->hasAssociation($identifier)) {
+                $associationMetadata = $classMetadata->getAssociationMapping($identifier);
+                foreach ($associationMetadata['joinColumnFieldNames'] as $columnName) {
+                    $ids["{$fieldName}_{$columnName}"] = $columnName;
+                }
+            } else {
+                $ids["{$fieldName}_{$identifier}"] = $identifier;
+            }
+        }
+        return $ids;
+    }
+
+    private function remapAssociation(ClassMetadata $classMetadata, array $mapping, EntityManager $em)
     {
         $newMapping = $this->resolveTargetEntities[$mapping['targetEntity']];
-        $newMapping = array_replace_recursive($mapping, $newMapping);
-        $newMapping['fieldName'] = $mapping['fieldName'];
+        $targetEntity = $newMapping['targetEntity'];
+        $fieldName = $mapping['fieldName'];
 
-        unset($classMetadata->associationMappings[$mapping['fieldName']]);
+        if ($em->getMetadataFactory()->hasMetadataFor($targetEntity)) {
+            $remap = $em->getClassMetadata($targetEntity);
+            $ids = $remap->getIdentifier();
+            if (count($ids) > 1) {
+                $ids = $this->getMappedIdentifiers($fieldName, $remap);
+                foreach ($ids as $name => $referencedColumnName) {
+                    $newMapping['joinColumns'][] = [
+                        'name' => $name,
+                        'referencedColumnName' => $referencedColumnName,
+                    ];
+                }
+            }
+        }
+
+        $newMapping = array_replace_recursive($mapping, $newMapping);
+        $newMapping['fieldName'] = $fieldName;
+
+        unset($classMetadata->associationMappings[$fieldName]);
 
         switch ($mapping['type']) {
             case ClassMetadata::MANY_TO_MANY:
